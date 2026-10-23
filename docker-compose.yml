@@ -63,3 +63,17 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+  app:
+    build: ./app
+    container_name: pedidos_app
+    depends_on:
+      - postgres
+      - kafka
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pedidos_db
+      KAFKA_BOOTSTRAP: kafka:9092
+      TOPIC: cdc.public.pedidos
+    volumes:
+      - ./app:/app

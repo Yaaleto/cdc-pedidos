@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CDC · Gestión de pedidos</title>
+<style>
+  :root{--bg:#f4f5f7;--card:#fff;--ink:#1c1e21;--mut:#6b7280;--line:#eceef1}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:12px 20px;background:#1f2937;color:#fff}
+  header small{color:#cbd5e1}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
+  @media(max-width:1000px){main{grid-template-columns:1fr}}
+  section{background:var(--card);border-radius:10px;padding:16px;box-shadow:0 1px 3px #0002}
+  h2{margin:0;font-size:18px}
+  .sub{color:var(--mut);font-size:13px;margin:2px 0 12px}
+  form{display:grid;grid-template-columns:1.2fr 1.2fr .6fr .8fr 1fr;gap:6px;margin-bottom:12px}
+  .btns{grid-column:1/-1;display:flex;gap:6px}
+  input,select,button{padding:7px;font-size:14px;border:1px solid #cfd4da;border-radius:6px;min-width:0}
+  button{cursor:pointer;background:#2563eb;color:#fff;border-color:#2563eb}
+  button.sec{background:#fff;color:#374151;border-color:#cfd4da}
+  button.del{background:#dc2626;border-color:#dc2626}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:6px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:600;font-size:12px}
+  td button{padding:3px 8px;font-size:12px}
+  .flash{animation:f 1.2s}
+  @keyframes f{from{background:#fef08a}to{background:transparent}}
+  #log{margin-top:8px;max-height:260px;overflow:auto;font-size:13px}
+  .ev{padding:6px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:baseline}
+  .op{font-weight:700;font-size:11px;padding:2px 6px;border-radius:4px;color:#fff}
+  .op.c,.op.r{background:#16a34a}.op.u{background:#d97706}.op.d{background:#dc2626}
+  .mut{color:var(--mut);margin-left:auto;white-space:nowrap}
+</style>
+</head>
+<body>
+<header><b>Sistema de pedidos</b> <small>· Change Data Capture: PostgreSQL → Debezium → Kafka</small></header>
+<main>
+  <section>
+    <h2>1. Vista transaccional</h2>
+    <div class="sub">Lee y escribe directamente en PostgreSQL (sistema origen)</div>
+    <form id="f">
+      <input id="cliente" placeholder="Cliente" required>
+      <input id="producto" placeholder="Producto" required>
+      <input id="cantidad" type="number" min="1" value="1" required>
+      <input id="total" type="number" step="0.01" min="0" placeholder="Total" required>
+      <select id="estado"><option>pendiente</option><option>enviado</option><option>entregado</option><option>cancelado</option></select>
+      <div class="btns">
+        <button id="guardar">Crear pedido</button>
+        <button type="button" class="sec" id="cancelar" hidden>Cancelar edición</button>
+      </div>
+    </form>
+    <table>
+      <thead><tr><th>ID</th><th>Cliente</th><th>Producto</th><th>Cant.</th><th>Total</th><th>Estado</th><th></th></tr></thead>
+      <tbody id="origen"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>2. Vista de consulta (vía CDC)</h2>
+    <div class="sub">Sistema consumidor separado: solo lee de Kafka, 0 consultas a PostgreSQL · <span id="conn">conectando…</span></div>
+    <table>
+      <thead><tr><th>ID</th><th>Cliente</th><th>Producto</th><th>Cant.</th><th>Total</th><th>Estado</th><th></th></tr></thead>
+      <tbody id="consulta"></tbody>
+    </table>
+    <h2 style="margin-top:18px;font-size:15px">Eventos CDC recibidos</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let editId = null, origen = new Map(), consulta = new Map();
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: {'Content-Type': 'application/json'}, ...opts });
+  if (!r.ok) { alert('Error: ' + await r.text()); return null; }
+  return r.json();
+}
+
+const fila = (p, acciones, pref) =>
+  `<tr id="${pref}${p.id}"><td>${p.id}</td><td>${esc(p.cliente)}</td><td>${esc(p.producto)}</td>` +
+  `<td>${p.cantidad}</td><td>${Number(p.total).toFixed(2)}</td><td>${esc(p.estado)}</td><td>${acciones}</td></tr>`;
+
+async function cargarOrigen() {
+  const rows = await api('/api/pedidos'); if (!rows) return;
+  origen = new Map(rows.map(p => [p.id, p]));
+  $('#origen').innerHTML = rows.map(p => fila(p,
+    `<button class="sec" onclick="editar(${p.id})">Editar</button> <button class="del" onclick="borrar(${p.id})">Borrar</button>`, 'o-')).join('');
+}
+
+function resetForm() {
+  editId = null; $('#f').reset(); $('#cantidad').value = 1;
+  $('#guardar').textContent = 'Crear pedido'; $('#cancelar').hidden = true;
+}
+function editar(id) {
+  const p = origen.get(id); if (!p) return;
+  editId = id;
+  $('#cliente').value = p.cliente; $('#producto').value = p.producto; $('#cantidad').value = p.cantidad;
+  $('#total').value = p.total; $('#estado').value = p.estado;
+  $('#guardar').textContent = 'Guardar cambios'; $('#cancelar').hidden = false;
+}
+async function borrar(id) { if (await api('/api/pedidos/' + id, {method: 'DELETE'})) cargarOrigen(); }
+$('#cancelar').onclick = resetForm;
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault();
+  const body = JSON.stringify({cliente: $('#cliente').value, producto: $('#producto').value,
+    cantidad: +$('#cantidad').value, total: $('#total').value, estado: $('#estado').value});
+  const res = editId ? await api('/api/pedidos/' + editId, {method: 'PUT', body})
+                     : await api('/api/pedidos', {method: 'POST', body});
+  if (res) { resetForm(); cargarOrigen(); }
+});
+
+// ---- Vista de consulta: se alimenta solo de eventos CDC por WebSocket ----
+const NOMBRE = {c: 'INSERT', u: 'UPDATE', d: 'DELETE', r: 'SNAPSHOT'};
+function pintarConsulta() {
+  const rows = [...consulta.values()].sort((a, b) => a.id - b.id);
+  $('#consulta').innerHTML = rows.map(p => fila(p, '', 'c-')).join('');
+}
+function cambios(b, a) {
+  if (!b || !a) return '';
+  return Object.keys(a).filter(k => k !== 'actualizado_en' && b[k] !== a[k])
+    .map(k => `${esc(k)}: ${esc(b[k])} → ${esc(a[k])}`).join(', ');
+}
+function conectar() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onopen = () => $('#conn').textContent = 'conectado';
+  ws.onclose = () => { $('#conn').textContent = 'reconectando…'; setTimeout(conectar, 1500); };
+  ws.onmessage = m => {
+    const d = JSON.parse(m.data);
+    if (d.type === 'snapshot') { consulta = new Map(d.rows.map(p => [p.id, p])); pintarConsulta(); return; }
+    const reg = d.after || d.before;
+    if (d.op === 'd') consulta.delete(d.before.id); else consulta.set(d.after.id, d.after);
+    pintarConsulta();
+    if (d.op !== 'd') $('#c-' + d.after.id)?.classList.add('flash');
+    const div = document.createElement('div'); div.className = 'ev';
+    div.innerHTML = `<span class="op ${d.op}">${NOMBRE[d.op] || d.op}</span>` +
+      `<span>pedido #${reg.id} · ${esc(reg.cliente)} ${cambios(d.before, d.after)}</span>` +
+      `<span class="mut">${d.latency_ms} ms · LSN ${d.lsn}</span>`;
+    $('#log').prepend(div);
+    while ($('#log').children.length > 60) $('#log').lastChild.remove();
+  };
+}
+cargarOrigen(); conectar();
+</script>
+</body>
+</html>
